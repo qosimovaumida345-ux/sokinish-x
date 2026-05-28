@@ -3,7 +3,6 @@ const { Telegraf } = require('telegraf');
 const express = require('express');
 const OpenAI = require('openai');
 
-// .env dan kalitlarni olamiz
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 
@@ -12,12 +11,11 @@ if(!BOT_TOKEN || !OPENROUTER_API_KEY) {
     process.exit(1);
 }
 
-const MUTE_DURATION_MINUTES = parseInt(process.env.MUTE_DURATION_MINUTES) || 10; // So'kingani uchun qancha vaqt muteda o'tirishi (daqiqa)
+const MUTE_DURATION_MINUTES = parseInt(process.env.MUTE_DURATION_MINUTES) || 10;
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Render Web Service doim ishlab turishi uchun / API orqali pingleb turishga yordam beradi
 app.get('/', (req, res) => {
     res.send('AI Anti-Swear Bot is online and running!');
 });
@@ -29,85 +27,84 @@ const openai = new OpenAI({
   apiKey: OPENROUTER_API_KEY,
 });
 
-// AI uchun instruksiya. (Juda aniq profil qilib berilgan)
-const systemPrompt = `You are an AI language moderation assistant. 
-Your ONLY task is to analyze the user's message and determine if it contains ANY profanity, swearing, bad words, insults, or highly offensive language IN ANY LANGUAGE (Uzbek, Russian, English, Turkish, etc).
-Respond strictly with a JSON object in this exact format:
-{"is_profane": true} -> if there is swearing/profanity.
-{"is_profane": false} -> if the message is completely clean.
-Do not output any explanation or extra text.`;
+// Qattiq so'kinishlarni aniqlovchi KUCHLI RegEx
+const hardSwearRegex = /naxuy|naxx?uy|dinax|blyat|blya?d|jalab|jalla|qanjiq|xaromi|haromi|gandon|gondon|pidar|piderez|ko\'?t|ammi|sika|sikam|dalbayob|yiban|chumich/i;
 
-bot.on('text', async (ctx) => {
-    // Bot shaxsiy yozishmalarda ishlashi shart emas, guruh formatiga maxsus
-    if (ctx.chat.type === 'private') {
-        return ctx.reply("💬 Bu botni guruhga qo'shing va menga xabarlarni o'chirish hamda foydalanuvchilarni cheklash (admin) huquqini bering.");
+const systemPrompt = `You are a strict text classification algorithm.
+Your only job is to analyze the user text in any language (especially Uzbek, Russian slang) and evaluate if it contains ANY form of profanity, insults, swear words, or rude language.
+Look closely for masked words.
+Output only JSON: {"is_profane": true} or {"is_profane": false}. No other text.`;
+
+bot.on('message', async (ctx) => {
+    if (ctx.chat && ctx.chat.type === 'private') {
+        return ctx.reply("💬 Bu botni guruhga qo'shing. Barcha so'kinishlarni o'zi tozalaydi!");
     }
 
-    const text = ctx.message.text;
+    const text = ctx.message && (ctx.message.text || ctx.message.caption);
+    if (!text) return;
 
     try {
-        // OpenRouter orqali modellarga ulashish (gemini juda tez va yaxshi mantiqqa ega)
-        const response = await openai.chat.completions.create({
-            model: 'google/gemini-2.5-flash', 
-            messages: [
-                { role: 'system', content: systemPrompt },
-                { role: 'user', content: text }
-            ],
-            response_format: { type: "json_object" }
-        });
+        let isProfane = false;
+        const cleanTextForCheck = text.replace(/[\s\.\,\_\-]/g, '').toLowerCase();
 
-        let content = response.choices[0].message.content.trim();
-        
-        // JSON formati noto'g'ri stringlar bilan o'ralgan bo'lsa (markdown) tozalaymiz
-        if (content.startsWith('```')) {
-            content = content.replace(/```(json)?|```/g, '').trim();
+        if (hardSwearRegex.test(cleanTextForCheck) || hardSwearRegex.test(text.toLowerCase())) {
+            isProfane = true;
+        } else {
+            try {
+                const response = await openai.chat.completions.create({
+                    model: 'meta-llama/llama-3.1-8b-instruct:free', 
+                    messages: [
+                        { role: 'system', content: systemPrompt },
+                        { role: 'user', content: text }
+                    ],
+                    response_format: { type: "json_object" }
+                });
+
+                let content = response.choices[0].message.content.trim().toLowerCase();
+                
+                if (content.includes('"is_profane": true') || content.includes('"is_profane":true')) {
+                    isProfane = true;
+                }
+            } catch (aiError) {
+                console.error("AI aniqlashda xato:", aiError.message);
+            }
         }
 
-        const result = JSON.parse(content);
-
-        // Agar AI so'kinish yoki haqorat bor debsa...
-        if (result.is_profane) {
-            
-            // 1. So'kingan xabarni o'chirish
+        if (isProfane) {
             try {
                 await ctx.deleteMessage(ctx.message.message_id);
             } catch (e) {
-                console.error("Xabarni o'chirishda xatolik:", e.message);
+                console.error("Xabarni o'chirish huquqi yo'q:", e.message);
             }
 
-            // 2. Foydalanuvchini yozishdan cheklash (Ban / Mute)
+            try {
+                const userLink = `<a href="tg://user?id=${ctx.from.id}">${ctx.from.first_name || 'Foydalanuvchi'}</a>`;
+                await ctx.reply(`${userLink}, so'kinish mumkin emas! 🚫`, { parse_mode: 'HTML' });
+            } catch (e) {
+                console.error("Javob yozishda xato:", e.message);
+            }
+
             const untilDate = Math.floor(Date.now() / 1000) + (MUTE_DURATION_MINUTES * 60);
-            
             try {
                 await ctx.restrictChatMember(ctx.from.id, {
-                    permissions: {
-                        can_send_messages: false, // yozisha olmaydi
-                        can_send_media_messages: false, // rasm-video tashlay olmaydi
-                        can_send_other_messages: false, // stikerlar taqiqlangan
-                        can_add_web_page_previews: false // ssilka taqiqlangan
-                    },
+                    permissions: { can_send_messages: false },
                     until_date: untilDate
                 });
-                
-                await ctx.reply(`🚫 <a href="tg://user?id=${ctx.from.id}">${ctx.from.first_name || 'Foydalanuvchi'}</a> guruhda haqoratli so'z ishlatgani uchun ${MUTE_DURATION_MINUTES} daqiqaga "mute" qilingan (yozish huquqidan mahrum qilingan)!`, { parse_mode: 'HTML' });
             } catch (e) {
-                console.error("Mute qilishda xatolik:", e.message);
-                await ctx.reply(`🚫 <a href="tg://user?id=${ctx.from.id}">${ctx.from.first_name || 'Foydalanuvchi'}</a> so'kindi, diqqat qiling! (Bot pneal berishi / band qilishi uchun to'liq admin huquq berishingiz kerak)`, { parse_mode: 'HTML' });
+                console.error("Mute qilish uchun huquq yo'q:", e.message);
             }
         }
     } catch (error) {
-        console.error("AI so'rovida yoki matn tekshirishda xatolik:", error.message);
+        console.error("Umumiy xatolik:", error.message);
     }
 });
 
-// Botni ishga tushiramiz
 bot.launch().then(() => {
-    console.log("🤖 Telegram bot muvaffaqiyatli ishga tushdi va xabarlarni eshitmoqda (polling mode)...");
+    console.log("🤖 Anti-Swear Bot ish qo'shildi!");
 }).catch(console.error);
 
-// Eksklyuziv tarzda Express serverni yoqamiz (Render Web Service platformasi xursand bo'lib portni tasdiqlashi uchun)
 app.listen(PORT, () => {
-    console.log(`🌐 Express web-server Render uchun ishga tushdi: port ${PORT}`);
+    console.log(`🌐 Express web-server port ${PORT} da yondi.`);
 });
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
