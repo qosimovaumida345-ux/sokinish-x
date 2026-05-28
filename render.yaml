@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: telegram-anti-sokinish-bot
+    env: node
+    buildCommand: npm install
+    startCommand: npm start
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: 18.20.0
+      - key: BOT_TOKEN
+        sync: false # Render paneli orqali kiritishingiz kerak bo'ladi
+      - key: OPENROUTER_API_KEY
+        sync: false # Render paneli orqali kiritishingiz kerak bo'ladi
+      - key: MUTE_DURATION_MINUTES
+        value: 10
