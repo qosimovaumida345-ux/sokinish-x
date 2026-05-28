@@ -2,6 +2,8 @@ require('dotenv').config();
 const { Telegraf } = require('telegraf');
 const express = require('express');
 const OpenAI = require('openai');
+const Filter = require('bad-words'); // inglizcha npm kutubxonasi (400+ qattiq so'zlar)
+const { generateMegaRegex } = require('./badwords'); // Siz uchun tuzilgan keng O'zbek/Rus bazasi
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
@@ -27,11 +29,12 @@ const openai = new OpenAI({
   apiKey: OPENROUTER_API_KEY,
 });
 
-// Qattiq so'kinishlarni aniqlovchi KUCHLI RegEx
-const hardSwearRegex = /naxuy|naxx?uy|dinax|blyat|blya?d|jalab|jalla|qanjiq|xaromi|haromi|gandon|gondon|pidar|piderez|ko\'?t|ammi|sika|sikam|dalbayob|yiban|chumich/i;
+// Kutubxonalar va mega filtr qoidalarni yuklaymiz (Jami 1500+ haqorat so'zlariga yetadi)
+const englishFilter = new Filter();
+const { exact: exactUzRuRegex, roots: rootsUzRuRegex } = generateMegaRegex();
 
 const systemPrompt = `You are a strict text classification algorithm.
-Your only job is to analyze the user text in any language (especially Uzbek, Russian slang) and evaluate if it contains ANY form of profanity, insults, swear words, or rude language.
+Your only job is to analyze the user text in any language (especially deep Uzbek slang, Russian mat, etc.) and evaluate if it contains ANY form of profanity, insults, swear words, or rude language.
 Look closely for masked words.
 Output only JSON: {"is_profane": true} or {"is_profane": false}. No other text.`;
 
@@ -45,11 +48,20 @@ bot.on('message', async (ctx) => {
 
     try {
         let isProfane = false;
+        
+        // Bo'shliqlar olib tashlangan versiya (xarflar orasiga probel qo'ysa ham topadi d i n ax)
         const cleanTextForCheck = text.replace(/[\s\.\,\_\-]/g, '').toLowerCase();
 
-        if (hardSwearRegex.test(cleanTextForCheck) || hardSwearRegex.test(text.toLowerCase())) {
+        // 1-qadam: BARCHA TILLAR (Ingliz, O'zbek, Rus 1500+ tadan izlaydi)
+        if (
+            englishFilter.isProfane(text) || 
+            exactUzRuRegex.test(text.toLowerCase()) ||
+            rootsUzRuRegex.test(cleanTextForCheck) ||
+            rootsUzRuRegex.test(text.toLowerCase())
+        ) {
             isProfane = true;
         } else {
+            // 2-qadam: AI bazasi orqali Mantiqiy tekshirish, ya'ni inson bilmagan narsani topsa
             try {
                 const response = await openai.chat.completions.create({
                     model: 'meta-llama/llama-3.1-8b-instruct:free', 
@@ -72,12 +84,14 @@ bot.on('message', async (ctx) => {
 
         if (isProfane) {
             try {
+                // Xabarni yo'q qilish
                 await ctx.deleteMessage(ctx.message.message_id);
             } catch (e) {
                 console.error("Xabarni o'chirish huquqi yo'q:", e.message);
             }
 
             try {
+                // Rasm yoki sticker bo'lsa uni ogohlantirish bilan almashtirish
                 const userLink = `<a href="tg://user?id=${ctx.from.id}">${ctx.from.first_name || 'Foydalanuvchi'}</a>`;
                 await ctx.reply(`${userLink}, so'kinish mumkin emas! 🚫`, { parse_mode: 'HTML' });
             } catch (e) {
@@ -100,7 +114,7 @@ bot.on('message', async (ctx) => {
 });
 
 bot.launch().then(() => {
-    console.log("🤖 Anti-Swear Bot ish qo'shildi!");
+    console.log("🤖 1500+ Mega Anti-Swear Bot eshitmoqda...");
 }).catch(console.error);
 
 app.listen(PORT, () => {
